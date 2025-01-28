@@ -1,0 +1,190 @@
+---
+title: "住宅価格の予測モデル"
+author: "三上"
+date: "2025-01-29"
+format: 
+    html:
+    embed-resources: true
+editor: visual
+---
+
+## ライブラリ
+
+```{r}
+library(tidyverse)
+library(tidymodels)
+```
+
+## データの確認
+
+tidymodelsパッケージに入っているAmes Housingデータを読み込む。このデータはアイオワ州Ames地区の住宅データである。
+
+```{r}
+df <- ames
+df
+```
+
+列名も確認する。変数のうち"Sale_Price"の予測モデルを構築する。
+
+```{r}
+colnames(df)
+```
+
+"Sale_Price"の分布を確認する。
+
+```{r}
+hist(df$Sale_Price, breaks = 50)
+```
+
+## データ分割
+
+学習データと評価データに分割する。
+
+```{r}
+# 乱数を固定
+set.seed(123)
+
+# 学習データと評価データを"Sale_Price"で層化して分割
+ames_split <- rsample::initial_split(df, strata = "Sale_Price")
+ames_train <- training(ames_split)
+ames_test <- testing(ames_split)
+
+# 検証データも分割（クロスバリデーション）
+cv_folds <- vfold_cv(ames_train, strata = "Sale_Price", v = 10)
+```
+
+## データ前処理（特徴量エンジニアリング）
+
+```{r}
+# 前処理のレシピ作成
+ames_recipe <- recipe(Sale_Price ~ ., data = ames_train) |>
+  step_nzv(all_predictors()) |>          # 低分散特徴量を削除
+  step_normalize(all_numeric_predictors()) |>
+  step_dummy(all_nominal_predictors(), one_hot = TRUE) |>
+  step_corr(all_numeric_predictors(), threshold = 0.9) # 高相関の特徴量を削除
+
+```
+
+## モデル作成
+
+ランダムフォレストでモデル作成する。
+
+```{r}
+rf_model <- rand_forest(mtry = floor(sqrt(ncol(ames_train) - 1)), trees = 500) |>
+  set_engine("ranger") |>
+  set_mode("regression")
+
+```
+
+ワークフローの作成
+
+```{r}
+ames_workflow <- workflow() |>
+  add_recipe(ames_recipe) |>
+  add_model(rf_model)
+
+```
+
+## モデル学習
+
+ハイパーパラメータのチューニングはせずに、とりあえず作ったモデルで学習・評価してベースラインを作る。
+
+```{r}
+# モデルの学習
+rf_fit <- ames_workflow |>
+  fit(data = ames_train)
+
+# テストデータで予測
+baseline_predictions <- rf_fit |>
+  predict(ames_test) |>
+  bind_cols(ames_test)
+
+# モデルの評価
+baseline_metrics <- baseline_predictions |>
+  metrics(truth = Sale_Price, estimate = .pred)
+
+print(baseline_metrics)
+
+```
+
+予測値と実測値をプロットしてみる
+
+```{r}
+# プロット
+baseline_predictions |>
+  ggplot(aes(x = Sale_Price, y = .pred)) +
+  geom_point(alpha = 0.5) +  # 実測値と予測値の散布図
+  geom_abline(color = "red", linetype = "dashed") +  # 理想の線（y = x）
+  labs(
+    title = "予測値 vs 実測値",
+    x = "実測値 (Sale_Price)",
+    y = "予測値 (.pred)"
+  ) +
+  theme_minimal()
+```
+
+## ハイパーパラメータのチューニング
+
+```{r}
+# ハイパーパラメータ範囲の設定
+grid <- grid_regular(
+  mtry(range = c(3, 20)),       # mtry（特徴量の数）の範囲
+  trees(range = c(100, 500)),
+  min_n(range = c(5, 20)),      # min_n（ノードの最小データ数）の範囲
+  levels = 5                    # 各パラメータの分割数
+)
+
+# チューニング用のモデルを作成
+rf_model_tune <- rand_forest(
+  mtry = tune(),
+  trees = tune(), 
+  min_n = tune()
+) |>
+  set_engine("ranger") |>
+  set_mode("regression")
+
+# ワークフローに追加
+ames_workflow_tune <- workflow() |>
+  add_recipe(ames_recipe) |>
+  add_model(rf_model_tune)
+
+# チューニング実行
+set.seed(123)
+tuned_results <- tune_grid(
+  ames_workflow_tune,
+  resamples = cv_folds,
+  grid = grid,
+  metrics = metric_set(rmse)  # RMSE評価指標
+)
+
+# ベストなパラメータを確認
+best_params <- select_best(tuned_results, "rmse")
+print(best_params)
+
+```
+
+## モデル作成
+
+まずはLightGBMでモデルを作成する。LightGBMは回帰と分類両方いけるので、とりあえずはこれ一択で構わない。
+
+＜LightGBMの良いところ＞
+
+-   精度が高い
+
+-   処理が高速
+
+-   カテゴリ変数のダミー処理が不要
+
+-   NAあっても処理できる
+
+-   異常値の影響を受けにくい
+
+```{r}
+library(lightgbm)
+```
+
+ワークフローを作成する。
+
+```{r}
+
+```
